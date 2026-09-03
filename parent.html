@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>دخول ولي الأمر</title>
+<link rel="stylesheet" href="./shared.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="./supabase-config.js"></script>
+<script src="./app-common.js"></script>
+</head>
+<body>
+<div id="shell"><div id="app"></div></div>
+
+<script>
+function render(){
+  const app = document.getElementById('app');
+  app.innerHTML = `
+  <div class="brand"><div class="brand-mark">س</div><div><div class="brand-name">سنتر المدرسين</div><div class="brand-sub">بوابة ولي الأمر</div></div></div>
+  <div class="hero">
+    <h1>تابع حضور وغياب ودرجات ابنك أول بأول</h1>
+    <p>سجّل الدخول بنفس البريد الإلكتروني وكلمة المرور المسجّلة بحساب ابنك في السنتر.</p>
+  </div>
+  <div class="card">
+    <div class="field"><label>البريد الإلكتروني (الخاص بحساب الابن/الابنة)</label><input id="email" type="email" placeholder="student@example.com"></div>
+    <div class="field"><label>كلمة المرور</label><input id="pw" type="password" placeholder="••••••••"></div>
+    <button class="btn btn-primary" id="loginBtn" onclick="doLogin()">دخول</button>
+  </div>
+  <a class="link-btn" href="./index.html" style="color:var(--dim);">دخول الطالب من هنا</a>
+  `;
+}
+
+async function doLogin(){
+  const email = document.getElementById('email').value.trim().toLowerCase();
+  const pw = document.getElementById('pw').value;
+  if(!email || !pw){ showToast('أكمل البيانات', true); return; }
+  const btn = document.getElementById('loginBtn'); btn.disabled=true; btn.textContent='جارِ الدخول...';
+  try{
+    const hash = await hashPassword(pw);
+    const { data, error } = await sb.from('students').select('id, password_hash').eq('email', email).limit(1);
+    if(error) throw error;
+    if(!data || !data.length || data[0].password_hash !== hash){
+      showToast('البيانات غير صحيحة', true); btn.disabled=false; btn.textContent='دخول'; return;
+    }
+    localStorage.setItem('parent_session', JSON.stringify({ id:data[0].id }));
+    location.href = './parent-dashboard.html';
+  }catch(e){
+    console.error(e);
+    showToast('تعذر الاتصال بقاعدة البيانات', true);
+    btn.disabled=false; btn.textContent='دخول';
+  }
+}
+
+render();
+</script>
+</body>
+</html>

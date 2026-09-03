@@ -16,8 +16,8 @@
 <script>
 const DAYS = ["الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"];
 let TEACHER_ID = null;
-let DATA = { teacher:null, stages:[], students:[], sessions:[], attendance:[], payments:[] };
-let VIEW = { tab:'home', selSession:null, studentsTab:'active', manageTab:'stages' };
+let DATA = { teacher:null, stages:[], students:[], sessions:[], attendance:[], payments:[], exams:[], examGrades:[] };
+let VIEW = { tab:'home', selSession:null, studentsTab:'active', manageTab:'stages', selExam:null };
 
 (function guard(){
   const s = JSON.parse(localStorage.getItem('teacher_session')||'null');
@@ -35,20 +35,24 @@ async function boot(){
 
 async function loadAll(){
   try{
-    const [{data:teacher}, {data:stages}, {data:students}, {data:sessions}] = await Promise.all([
+    const [{data:teacher}, {data:stages}, {data:students}, {data:sessions}, {data:exams}] = await Promise.all([
       sb.from('teachers').select('*').eq('id', TEACHER_ID).single(),
       sb.from('stages').select('*').eq('teacher_id', TEACHER_ID).order('name'),
       sb.from('students').select('*').eq('teacher_id', TEACHER_ID).order('created_at'),
       sb.from('sessions').select('*').eq('teacher_id', TEACHER_ID).order('session_date').order('session_time'),
+      sb.from('exams').select('*').eq('teacher_id', TEACHER_ID).order('created_at', {ascending:false}),
     ]);
     DATA.teacher = teacher || null;
     DATA.stages = stages || [];
     DATA.students = students || [];
     DATA.sessions = sessions || [];
+    DATA.exams = exams || [];
     const sessionIds = DATA.sessions.map(s=>s.id);
     const studentIds = DATA.students.map(s=>s.id);
+    const examIds = DATA.exams.map(e=>e.id);
     DATA.attendance = sessionIds.length ? (await sb.from('attendance').select('*').in('session_id', sessionIds)).data || [] : [];
     DATA.payments = studentIds.length ? (await sb.from('payments').select('*').in('student_id', studentIds)).data || [] : [];
+    DATA.examGrades = examIds.length ? (await sb.from('exam_grades').select('*').in('exam_id', examIds)).data || [] : [];
   }catch(e){
     console.error(e);
     showToast('تعذر تحميل البيانات من قاعدة البيانات', true);
@@ -73,6 +77,15 @@ function paymentFor(studentId){
   return DATA.payments.find(p=>p.student_id===studentId && p.month===m) || null;
 }
 function isPaid(studentId){ const p = paymentFor(studentId); return !!(p && p.paid); }
+function examById(id){ return DATA.exams.find(e=>e.id===id); }
+function gradesForExam(examId){ return DATA.examGrades.filter(g=>g.exam_id===examId); }
+function gradeFor(examId, studentId){ return DATA.examGrades.find(g=>g.exam_id===examId && g.student_id===studentId) || null; }
+function studentsForStage(stageId){ return DATA.students.filter(s=>s.status==='active' && s.stage_id===stageId); }
+function examProgress(exam){
+  const total = studentsForStage(exam.stage_id).length;
+  const done = gradesForExam(exam.id).length;
+  return {done, total};
+}
 
 /* ---------------- RENDER ---------------- */
 function render(){
@@ -138,8 +151,23 @@ function tplHome(){
       <button class="btn btn-sm btn-primary" onclick="approveStudent('${s.id}')">قبول</button>
     </div>
   `).join('')}` : ''}
+
+  ${(()=>{
+    const unfinished = DATA.exams.map(e=>({e, p:examProgress(e)})).filter(x=>x.p.done < x.p.total).slice(0,3);
+    if(!unfinished.length) return '';
+    return `
+    <div class="section-title">امتحانات لسه محتاجة رصد درجات</div>
+    ${unfinished.map(({e,p})=>`
+      <div class="list-item" style="cursor:pointer;" onclick="openExamFromHome('${e.id}')">
+        <div class="avatar">${ICONS.grades}</div>
+        <div class="li-main"><div class="li-title">${esc(e.title)}</div><div class="li-sub">${esc(stageName(e.stage_id))} · رُصد ${p.done}/${p.total}</div></div>
+        <span class="badge badge-warn">رصد الدرجات</span>
+      </div>
+    `).join('')}`;
+  })()}
   `;
 }
+function openExamFromHome(examId){ VIEW.tab='manage'; VIEW.manageTab='exams'; render(); openExamGrades(examId); }
 function openAttendanceFor(id){ VIEW.tab='attendance'; VIEW.selSession=id; render(); }
 
 /* ---------------- ATTENDANCE ---------------- */
@@ -376,9 +404,10 @@ function tplManage(){
   <div class="tabs">
     <div class="tab ${mtab==='stages'?'active':''}" onclick="setManageTab('stages')">المراحل</div>
     <div class="tab ${mtab==='sessions'?'active':''}" onclick="setManageTab('sessions')">الحصص</div>
+    <div class="tab ${mtab==='exams'?'active':''}" onclick="setManageTab('exams')">الامتحانات</div>
     <div class="tab ${mtab==='settings'?'active':''}" onclick="setManageTab('settings')">الإعدادات</div>
   </div>
-  ${mtab==='stages'?tplStages():mtab==='sessions'?tplSessions():tplSettings()}
+  ${mtab==='stages'?tplStages():mtab==='sessions'?tplSessions():mtab==='exams'?tplExams():tplSettings()}
   `;
 }
 function setManageTab(t){ VIEW.manageTab=t; render(); }
@@ -417,6 +446,111 @@ async function setStagePrice(id, val){
 async function deleteStage(id){
   try{ await sb.from('stages').delete().eq('id', id); DATA.stages = DATA.stages.filter(s=>s.id!==id); render(); }
   catch(e){ console.error(e); showToast('لا يمكن الحذف لوجود طلاب أو حصص مرتبطة', true); }
+}
+
+/* ---------------- EXAMS ---------------- */
+function tplExams(){
+  if(!DATA.sessions.length) return `<div class="empty"><p>أضف حصصًا أولاً من تبويب "الحصص" قبل إنشاء امتحان</p></div>`;
+  const bySessionDesc = [...DATA.sessions].sort((a,b)=>(b.session_date+b.session_time).localeCompare(a.session_date+a.session_time));
+  return `
+  <div class="card">
+    <div class="card-title">إضافة امتحان جديد</div>
+    <div class="field"><label>عنوان الامتحان</label><input id="examTitle" type="text" placeholder="مثال: امتحان الشهر الأول"></div>
+    <div class="field"><label>الحصة المرتبطة بالامتحان</label>
+      <select id="examSession">
+        ${bySessionDesc.map(s=>`<option value="${s.id}">${esc(s.name)} — ${esc(stageName(s.stage_id))} · ${fmtDate(s.session_date)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field"><label>الدرجة النهائية للامتحان</label><input id="examMax" type="number" value="100" min="1"></div>
+    <button class="btn btn-primary" onclick="addExam()">${ICONS.plus} إضافة الامتحان</button>
+  </div>
+
+  <div class="section-title">الامتحانات</div>
+  ${DATA.exams.length? DATA.exams.map(e=>{
+    const p = examProgress(e);
+    return `<div class="list-item" style="cursor:pointer;" onclick="openExamGrades('${e.id}')">
+      <div class="avatar">${ICONS.grades}</div>
+      <div class="li-main"><div class="li-title">${esc(e.title)}</div><div class="li-sub">${esc(stageName(e.stage_id))} · من ${e.max_score} · رُصد ${p.done}/${p.total}</div></div>
+      <button class="x-btn" onclick="event.stopPropagation(); deleteExam('${e.id}')">${ICONS.trash}</button>
+    </div>`;
+  }).join('') : `<div class="empty"><p>لا يوجد امتحانات مضافة بعد</p></div>`}
+  `;
+}
+async function addExam(){
+  const title = document.getElementById('examTitle').value.trim();
+  const sessionId = document.getElementById('examSession').value;
+  const maxScore = Number(document.getElementById('examMax').value);
+  if(!title || !sessionId || !maxScore || maxScore<=0){ showToast('أكمل بيانات الامتحان', true); return; }
+  const sess = sessionById(sessionId);
+  try{
+    const { data, error } = await sb.from('exams').insert({teacher_id:TEACHER_ID, session_id:sessionId, stage_id:sess.stage_id, title, max_score:maxScore}).select().single();
+    if(error) throw error;
+    DATA.exams.unshift(data); render(); showToast('تمت إضافة الامتحان');
+  }catch(e){ console.error(e); showToast('تعذر إضافة الامتحان', true); }
+}
+async function deleteExam(id){
+  try{
+    await sb.from('exams').delete().eq('id', id);
+    DATA.exams = DATA.exams.filter(e=>e.id!==id);
+    DATA.examGrades = DATA.examGrades.filter(g=>g.exam_id!==id);
+    render();
+  }catch(e){ console.error(e); showToast('تعذر حذف الامتحان', true); }
+}
+function openExamGrades(examId){
+  const e = examById(examId);
+  const sess = sessionById(e.session_id);
+  const students = studentsForStage(e.stage_id);
+  openModal(`
+    <div class="modal-title">رصد درجات — ${esc(e.title)}</div>
+    <p class="small-note" style="margin-bottom:14px;">${esc(sess?sess.name:'')} · الدرجة النهائية ${e.max_score}</p>
+    <div id="examGradesList">
+      ${students.length? students.map(s=>{
+        const g = gradeFor(examId, s.id);
+        const absent = g ? g.absent : false;
+        const score = (g && !g.absent && g.score!=null) ? g.score : '';
+        return `
+        <div class="list-item" data-student="${s.id}">
+          <div class="li-main"><div class="li-title">${esc(s.name)}</div></div>
+          <input type="number" class="grade-score-input" data-sid="${s.id}" min="0" max="${e.max_score}" placeholder="الدرجة" value="${score}" ${absent?'disabled':''} style="width:74px;background:var(--surface2);border:1px solid var(--line);color:var(--text);padding:8px;border-radius:10px;font-size:12.5px;">
+          <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);white-space:nowrap;cursor:pointer;">
+            <input type="checkbox" class="grade-absent-chk" data-sid="${s.id}" ${absent?'checked':''} onchange="toggleAbsentInput(this)" style="width:15px;height:15px;">
+            غائب
+          </label>
+        </div>`;
+      }).join('') : `<div class="empty"><p>لا يوجد طلاب مفعّلين في هذه المرحلة</p></div>`}
+    </div>
+    ${students.length?`<button class="btn btn-primary" style="margin-top:14px;" onclick="saveExamGrades('${examId}')">${ICONS.check} حفظ الدرجات</button>`:''}
+  `, true);
+}
+function toggleAbsentInput(chk){
+  const sid = chk.dataset.sid;
+  const input = document.querySelector(`.grade-score-input[data-sid="${sid}"]`);
+  if(chk.checked){ input.value=''; input.disabled=true; } else { input.disabled=false; }
+}
+async function saveExamGrades(examId){
+  const e = examById(examId);
+  const toUpsert = [];
+  const toDeleteStudentIds = [];
+  document.querySelectorAll('#examGradesList [data-student]').forEach(row=>{
+    const sid = row.dataset.student;
+    const absent = row.querySelector('.grade-absent-chk').checked;
+    const scoreVal = row.querySelector('.grade-score-input').value;
+    if(!absent && scoreVal===''){ toDeleteStudentIds.push(sid); return; }
+    const score = absent ? null : Math.max(0, Math.min(e.max_score, Number(scoreVal)));
+    toUpsert.push({ exam_id: examId, student_id: sid, absent, score, updated_at: new Date().toISOString() });
+  });
+  try{
+    if(toUpsert.length){
+      const { data, error } = await sb.from('exam_grades').upsert(toUpsert, {onConflict:'exam_id,student_id'}).select();
+      if(error) throw error;
+      DATA.examGrades = DATA.examGrades.filter(g=>!(g.exam_id===examId && toUpsert.some(u=>u.student_id===g.student_id))).concat(data||[]);
+    }
+    if(toDeleteStudentIds.length){
+      await sb.from('exam_grades').delete().eq('exam_id', examId).in('student_id', toDeleteStudentIds);
+      DATA.examGrades = DATA.examGrades.filter(g=>!(g.exam_id===examId && toDeleteStudentIds.includes(g.student_id)));
+    }
+    closeModal(); showToast('تم حفظ الدرجات'); render();
+  }catch(e){ console.error(e); showToast('تعذر حفظ الدرجات', true); }
 }
 
 let SCHEDULE_DAYS = new Set();

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>لوحة ولي الأمر</title>
+<link rel="stylesheet" href="./shared.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="./supabase-config.js"></script>
+<script src="./app-common.js"></script>
+</head>
+<body>
+<div id="shell"><div id="app"></div></div>
+
+<script>
+let STUDENT_ID = null;
+let DATA = { student:null, stage:null, sessions:[], attendance:[], payment:null, price:0, exams:[], examGrades:[] };
+
+(function guard(){
+  const s = JSON.parse(localStorage.getItem('parent_session')||'null');
+  if(!s || !s.id){ location.href='./parent.html'; return; }
+  STUDENT_ID = s.id;
+  boot();
+})();
+
+async function boot(){
+  document.getElementById('app').innerHTML = `<div class="empty" style="padding-top:100px;"><p>جارِ التحميل...</p></div>`;
+  await loadAll();
+  if(!DATA.student){ localStorage.removeItem('parent_session'); location.href='./parent.html'; return; }
+  if(DATA.student.status !== 'active'){ renderPending(); return; }
+  render();
+}
+
+async function loadAll(){
+  try{
+    const { data: student, error } = await sb.from('students').select('*').eq('id', STUDENT_ID).single();
+    if(error) throw error;
+    DATA.student = student;
+    const [{data:stage}, {data:teacher}, {data:sessions}] = await Promise.all([
+      sb.from('stages').select('*').eq('id', student.stage_id).single(),
+      sb.from('teachers').select('*').eq('id', student.teacher_id).single(),
+      sb.from('sessions').select('*').eq('stage_id', student.stage_id).order('session_date').order('session_time'),
+    ]);
+    DATA.stage = stage || null;
+    DATA.price = (stage && stage.price) ? stage.price : (teacher ? teacher.default_price : 0);
+    DATA.sessions = sessions || [];
+    const sessionIds = DATA.sessions.map(s=>s.id);
+    DATA.attendance = sessionIds.length ? ((await sb.from('attendance').select('*').eq('student_id', STUDENT_ID).in('session_id', sessionIds)).data || []) : [];
+    const m = monthStr();
+    const { data: payment } = await sb.from('payments').select('*').eq('student_id', STUDENT_ID).eq('month', m).maybeSingle ? await sb.from('payments').select('*').eq('student_id', STUDENT_ID).eq('month', m).maybeSingle() : {data:null};
+    DATA.payment = payment || null;
+
+    const { data: exams } = await sb.from('exams').select('*').eq('stage_id', student.stage_id).order('created_at', {ascending:false});
+    DATA.exams = exams || [];
+    const examIds = DATA.exams.map(e=>e.id);
+    DATA.examGrades = examIds.length ? ((await sb.from('exam_grades').select('*').eq('student_id', STUDENT_ID).in('exam_id', examIds)).data || []) : [];
+  }catch(e){ console.error(e); showToast('تعذر تحميل البيانات', true); }
+}
+
+function renderPending(){
+  document.getElementById('app').innerHTML = `
+  <div class="row-between" style="margin-bottom:18px;"><div class="back-row" style="margin-bottom:0;"><button class="back-btn" onclick="doLogout()">${ICONS.back}</button><div class="back-title">حالة الطلب</div></div>${themeToggleBtn()}</div>
+  <div class="center-card">
+    <div style="width:56px;height:56px;border-radius:16px;background:var(--amber-soft);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;">${ICONS.clock}</div>
+    <h3 style="font-size:16px;margin-bottom:8px;">حساب الابن/الابنة قيد المراجعة</h3>
+    <p class="muted">أهلاً، حساب ${esc(DATA.student.name)} لسه مستنّي موافقة المدرس على الانضمام للسنتر.</p>
+  </div>
+  <button class="btn btn-outline" style="margin-top:16px;" onclick="boot()">تحديث الحالة</button>
+  `;
+}
+function doLogout(){ localStorage.removeItem('parent_session'); location.href='./parent.html'; }
+
+function attendedIds(){ return new Set(DATA.attendance.map(a=>a.session_id)); }
+function isTimePast(s){ return (s.session_date+'T'+s.session_time) < new Date().toISOString().slice(0,16); }
+function isPastForStudent(s, attended){ return isTimePast(s) || attended.has(s.id); }
+function gradeForExam(examId){ return DATA.examGrades.find(g=>g.exam_id===examId) || null; }
+
+function render(){
+  const app = document.getElementById('app');
+  const attended = attendedIds();
+  const past = DATA.sessions.filter(s=>isPastForStudent(s, attended));
+  const countable = past.filter(s=>s.counts_for_payment!==false);
+  const attendedCount = countable.filter(s=>attended.has(s.id)).length;
+  const missedCount = countable.length - attendedCount;
+  const upcoming = DATA.sessions.filter(s=>!isPastForStudent(s, attended));
+  const paid = !!(DATA.payment && DATA.payment.paid);
+
+  app.innerHTML = `
+  <div class="row-between" style="margin-bottom:18px;">
+    <div class="row-between" style="gap:10px;">
+      <div class="theme-toggle" style="pointer-events:none;">${ICONS.parent}</div>
+      <div><div class="brand-name" style="font-size:17px;">ولي أمر ${esc(DATA.student.name)}</div><div class="muted">${esc(DATA.stage?DATA.stage.name:'')}</div></div>
+    </div>
+    <div class="header-actions">${themeToggleBtn()}<button class="inline-icon-btn" onclick="doLogout()">${ICONS.logout}</button></div>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-num good">${attendedCount}</div><div class="stat-label">حصص حضرها</div></div>
+    <div class="stat-card"><div class="stat-num bad">${missedCount}</div><div class="stat-label">حصص غاب عنها</div></div>
+    <div class="stat-card"><div class="stat-num ${paid?'good':'warn'}">${paid?'مدفوع':'غير مدفوع'}</div><div class="stat-label">اشتراك ${esc(monthStr())}</div></div>
+  </div>
+  ${!paid?`<p class="small-note" style="margin-bottom:16px;">قيمة اشتراك الشهر ${DATA.price} جنيه — من فضلك تواصل مع المدرس لتأكيد الدفع.</p>`:''}
+
+  <div class="section-title">${ICONS.grades} الدرجات</div>
+  ${DATA.exams.length? DATA.exams.map(e=>examRow(e)).join('') : `<div class="empty"><p>لا يوجد امتحانات مسجّلة بعد</p></div>`}
+
+  <div class="section-title">الحصص القادمة</div>
+  ${upcoming.length? upcoming.map(s=>sessionRow(s, attended.has(s.id), false)).join('') : `<div class="empty"><p>لا يوجد حصص قادمة مجدولة</p></div>`}
+
+  <div class="section-title">حصص سابقة</div>
+  ${past.length? [...past].reverse().slice(0,10).map(s=>sessionRow(s, attended.has(s.id), true)).join('') : `<div class="empty"><p>لا يوجد حصص سابقة بعد</p></div>`}
+  `;
+}
+function examRow(e){
+  const g = gradeForExam(e.id);
+  let badge, sub;
+  if(!g){ badge = `<span class="badge badge-warn">لم يُرصد بعد</span>`; sub = `الدرجة النهائية ${e.max_score}`; }
+  else if(g.absent){ badge = `<span class="badge badge-bad">غائب</span>`; sub = `الدرجة النهائية ${e.max_score}`; }
+  else { const good = g.score!=null && (g.score/e.max_score)>=0.5; badge = `<span class="badge ${good?'badge-good':'badge-bad'}">${fmtGrade(g.score, e.max_score)}</span>`; sub = `الدرجة النهائية ${e.max_score}`; }
+  return `<div class="list-item">
+    <div class="avatar">${ICONS.grades}</div>
+    <div class="li-main"><div class="li-title">${esc(e.title)}</div><div class="li-sub">${sub}</div></div>
+    ${badge}
+  </div>`;
+}
+function sessionRow(s, present, isPast){
+  const badge = isPast ? (present?`<span class="badge badge-good">حاضر</span>`:`<span class="badge badge-bad">غائب</span>`)
+                       : `<span class="badge badge-warn">قادمة</span>`;
+  const extraTag = s.counts_for_payment===false ? `<span class="badge badge-extra" style="padding:3px 8px;font-size:10px;margin-inline-start:6px;">إضافية</span>` : '';
+  return `<div class="list-item">
+    <div class="avatar">${ICONS.calendar}</div>
+    <div class="li-main"><div class="li-title">${esc(s.name)}${extraTag}</div><div class="li-sub">${fmtDate(s.session_date)} · ${fmtTime(s.session_time)}</div></div>
+    ${badge}
+  </div>`;
+}
+</script>
+</body>
+</html>

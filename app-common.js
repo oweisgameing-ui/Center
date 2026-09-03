@@ -22,6 +22,8 @@ const ICONS = {
   calendar:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>`,
   sun:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2 12h2.5M19.5 12H22M4.2 19.8 6 18M18 6l1.8-1.8"/></svg>`,
   moon:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>`,
+  grades:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 3v3h6V3M8 12h8M8 16h5"/></svg>`,
+  parent:`<svg viewBox="0 0 24 24" fill="none" stroke="#c9a463" stroke-width="1.8"><circle cx="8" cy="8" r="3.2"/><circle cx="17" cy="9" r="2.6"/><path d="M3 20c0-3.2 2.4-5 5-5s5 1.8 5 5"/><path d="M13.2 20c.2-2.4 1.8-4 3.8-4s4 1.6 4 4"/></svg>`,
 };
 
 /* ---------------- THEME ---------------- */
@@ -71,6 +73,14 @@ function fmtTime(t){
   const period = h>=12 ? 'م' : 'ص';
   const h12 = ((h+11)%12)+1;
   return `${h12}:${String(m).padStart(2,'0')} ${period}`;
+}
+function fmtGrade(grade, max){
+  if(grade == null) return '—';
+  return `${grade}/${max}`;
+}
+function gradePct(grade, max){
+  if(grade == null || !max) return 0;
+  return Math.max(0, Math.min(100, Math.round((grade/max)*100)));
 }
 function waLink(phone, msg){
   let p = String(phone||'').replace(/\D/g,'');

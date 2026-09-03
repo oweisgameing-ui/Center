@@ -15,7 +15,7 @@
 
 <script>
 let STUDENT_ID = null;
-let DATA = { student:null, stage:null, sessions:[], attendance:[], payment:null, price:0 };
+let DATA = { student:null, stage:null, sessions:[], attendance:[], payment:null, price:0, exams:[], examGrades:[] };
 let scanStream=null, scanRAF=null;
 
 (function guard(){
@@ -51,6 +51,11 @@ async function loadAll(){
     const m = monthStr();
     const { data: payment } = await sb.from('payments').select('*').eq('student_id', STUDENT_ID).eq('month', m).maybeSingle ? await sb.from('payments').select('*').eq('student_id', STUDENT_ID).eq('month', m).maybeSingle() : {data:null};
     DATA.payment = payment || null;
+
+    const { data: exams } = await sb.from('exams').select('*').eq('stage_id', student.stage_id).order('created_at', {ascending:false});
+    DATA.exams = exams || [];
+    const examIds = DATA.exams.map(e=>e.id);
+    DATA.examGrades = examIds.length ? ((await sb.from('exam_grades').select('*').eq('student_id', STUDENT_ID).in('exam_id', examIds)).data || []) : [];
   }catch(e){ console.error(e); showToast('تعذر تحميل بياناتك', true); }
 }
 
@@ -68,6 +73,7 @@ function renderPending(){
 function doLogout(){ localStorage.removeItem('student_session'); location.href='./index.html'; }
 
 function attendedIds(){ return new Set(DATA.attendance.map(a=>a.session_id)); }
+function gradeForExam(examId){ return DATA.examGrades.find(g=>g.exam_id===examId) || null; }
 function isTimePast(s){ return (s.session_date+'T'+s.session_time) < new Date().toISOString().slice(0,16); }
 function isPastForStudent(s, attended){ return isTimePast(s) || attended.has(s.id); }
 
@@ -99,7 +105,22 @@ function render(){
 
   <div class="section-title">حصص سابقة</div>
   ${past.length? [...past].reverse().slice(0,8).map(s=>sessionRow(s, attended.has(s.id), true)).join('') : `<div class="empty"><p>لا يوجد حصص سابقة بعد</p></div>`}
+
+  <div class="section-title">${ICONS.grades} الدرجات</div>
+  ${DATA.exams.length? DATA.exams.map(e=>examRow(e)).join('') : `<div class="empty"><p>لا يوجد امتحانات مسجّلة بعد</p></div>`}
   `;
+}
+function examRow(e){
+  const g = gradeForExam(e.id);
+  let badge, sub;
+  if(!g){ badge = `<span class="badge badge-warn">لم يُرصد بعد</span>`; sub = `الدرجة النهائية ${e.max_score}`; }
+  else if(g.absent){ badge = `<span class="badge badge-bad">غائب</span>`; sub = `الدرجة النهائية ${e.max_score}`; }
+  else { const good = g.score!=null && (g.score/e.max_score)>=0.5; badge = `<span class="badge ${good?'badge-good':'badge-bad'}">${fmtGrade(g.score, e.max_score)}</span>`; sub = `الدرجة النهائية ${e.max_score}`; }
+  return `<div class="list-item">
+    <div class="avatar">${ICONS.grades}</div>
+    <div class="li-main"><div class="li-title">${esc(e.title)}</div><div class="li-sub">${sub}</div></div>
+    ${badge}
+  </div>`;
 }
 function sessionRow(s, present, isPast){
   const badge = isPast ? (present?`<span class="badge badge-good">حاضر</span>`:`<span class="badge badge-bad">غائب</span>`)
