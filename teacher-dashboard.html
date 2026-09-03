@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>لوحة المدرس</title>
+<link rel="stylesheet" href="./shared.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="./supabase-config.js"></script>
+<script src="./app-common.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+<div id="shell"><div id="app"></div></div>
+
+<script>
+const DAYS = ["الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"];
+let TEACHER_ID = null;
+let DATA = { teacher:null, stages:[], students:[], sessions:[], attendance:[], payments:[] };
+let VIEW = { tab:'home', selSession:null, studentsTab:'active', manageTab:'stages' };
+
+(function guard(){
+  const s = JSON.parse(localStorage.getItem('teacher_session')||'null');
+  if(!s || !s.id){ location.href='./teacher-login.html'; return; }
+  TEACHER_ID = s.id;
+  boot();
+})();
+
+async function boot(){
+  document.getElementById('app').innerHTML = `<div class="empty" style="padding-top:100px;"><p>جارِ التحميل...</p></div>`;
+  await loadAll();
+  if(!DATA.teacher){ localStorage.removeItem('teacher_session'); location.href='./teacher-login.html'; return; }
+  render();
+}
+
+async function loadAll(){
+  try{
+    const [{data:teacher}, {data:stages}, {data:students}, {data:sessions}] = await Promise.all([
+      sb.from('teachers').select('*').eq('id', TEACHER_ID).single(),
+      sb.from('stages').select('*').eq('teacher_id', TEACHER_ID).order('name'),
+      sb.from('students').select('*').eq('teacher_id', TEACHER_ID).order('created_at'),
+      sb.from('sessions').select('*').eq('teacher_id', TEACHER_ID).order('session_date').order('session_time'),
+    ]);
+    DATA.teacher = teacher || null;
+    DATA.stages = stages || [];
+    DATA.students = students || [];
+    DATA.sessions = sessions || [];
+    const sessionIds = DATA.sessions.map(s=>s.id);
+    const studentIds = DATA.students.map(s=>s.id);
+    DATA.attendance = sessionIds.length ? (await sb.from('attendance').select('*').in('session_id', sessionIds)).data || [] : [];
+    DATA.payments = studentIds.length ? (await sb.from('payments').select('*').in('student_id', studentIds)).data || [] : [];
+  }catch(e){
+    console.error(e);
+    showToast('تعذر تحميل البيانات من قاعدة البيانات', true);
+  }
+}
+
+function stageName(id){ const s=DATA.stages.find(x=>x.id===id); return s?s.name:'—'; }
+function stagePrice(id){ const s=DATA.stages.find(x=>x.id===id); return (s&&s.price)?s.price:(DATA.teacher.default_price||250); }
+function sessionById(id){ return DATA.sessions.find(s=>s.id===id); }
+function studentById(id){ return DATA.students.find(s=>s.id===id); }
+function currentMonth(){ return monthStr(); }
+function sessionsThisMonthForStage(stageId){
+  const m = currentMonth();
+  return DATA.sessions.filter(s=>s.stage_id===stageId && s.session_date.slice(0,7)===m && s.counts_for_payment!==false);
+}
+function attendedCountThisMonth(studentId, stageId){
+  const ids = new Set(sessionsThisMonthForStage(stageId).map(s=>s.id));
+  return DATA.attendance.filter(a=>a.student_id===studentId && ids.has(a.session_id)).length;
+}
+function paymentFor(studentId){
+  const m = currentMonth();
+  return DATA.payments.find(p=>p.student_id===studentId && p.month===m) || null;
+}
+function isPaid(studentId){ const p = paymentFor(studentId); return !!(p && p.paid); }
+
+/* ---------------- RENDER ---------------- */
+function render(){
+  stopScanner();
+  const app = document.getElementById('app');
+  let body = '';
+  if(VIEW.tab==='home') body = tplHome();
+  else if(VIEW.tab==='attendance') body = tplAttendance();
+  else if(VIEW.tab==='students') body = tplStudents();
+  else if(VIEW.tab==='payments') body = tplPayments();
+  else if(VIEW.tab==='manage') body = tplManage();
+  app.innerHTML = body + tplNav();
+  if(VIEW.tab==='attendance') wireAttendanceInputs();
+}
+function tplNav(){
+  const items = [
+    {key:'home', label:'الرئيسية', icon:ICONS.home},
+    {key:'attendance', label:'التحضير', icon:ICONS.check},
+    {key:'students', label:'الطلبة', icon:ICONS.users},
+    {key:'payments', label:'المدفوعات', icon:ICONS.cash},
+    {key:'manage', label:'الإدارة', icon:ICONS.settings},
+  ];
+  return `<div class="navbar">${items.map(i=>`
+    <button class="nav-item ${VIEW.tab===i.key?'active':''}" onclick="setTab('${i.key}')">${i.icon}<span>${i.label}</span></button>
+  `).join('')}</div>`;
+}
+function setTab(t){ VIEW.tab=t; VIEW.selSession=null; render(); }
+function doLogout(){ localStorage.removeItem('teacher_session'); location.href='./teacher-login.html'; }
+
+/* ---------------- HOME ---------------- */
+function tplHome(){
+  const pending = DATA.students.filter(s=>s.status==='pending').length;
+  const active = DATA.students.filter(s=>s.status==='active');
+  const unpaid = active.filter(s=>!isPaid(s.id)).length;
+  const todayStr_ = todayStr();
+  const todaySessions = DATA.sessions.filter(s=>s.session_date===todayStr_);
+  return `
+  <div class="row-between" style="margin-bottom:18px;">
+    <div><div class="brand-name" style="font-size:17px;">${esc(DATA.teacher.center_name)}</div><div class="muted">لوحة المدرس</div></div>
+    <div class="header-actions">${themeToggleBtn()}<button class="inline-icon-btn" onclick="doLogout()">${ICONS.logout}</button></div>
+  </div>
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-num good">${active.length}</div><div class="stat-label">طالب مفعّل</div></div>
+    <div class="stat-card"><div class="stat-num alt">${pending}</div><div class="stat-label">طلبات جديدة</div></div>
+    <div class="stat-card"><div class="stat-num warn">${unpaid}</div><div class="stat-label">لم يدفع الشهر</div></div>
+  </div>
+
+  <div class="section-title">حصص اليوم</div>
+  ${todaySessions.length? todaySessions.map(s=>`
+    <div class="list-item">
+      <div class="avatar">${esc((stageName(s.stage_id)[0])||'ح')}</div>
+      <div class="li-main"><div class="li-title">${esc(s.name)}</div><div class="li-sub">${esc(stageName(s.stage_id))} · ${fmtTime(s.session_time)}</div></div>
+      <button class="btn btn-sm btn-primary" onclick="openAttendanceFor('${s.id}')">تحضير</button>
+    </div>
+  `).join('') : `<div class="empty"><p>لا يوجد حصص مجدولة اليوم</p></div>`}
+
+  ${pending>0?`
+  <div class="section-title">طلبات انضمام جديدة</div>
+  ${DATA.students.filter(s=>s.status==='pending').slice(0,3).map(s=>`
+    <div class="list-item">
+      <div class="avatar">${esc(s.name[0])}</div>
+      <div class="li-main"><div class="li-title">${esc(s.name)}</div><div class="li-sub">${esc(stageName(s.stage_id))}</div></div>
+      <button class="btn btn-sm btn-primary" onclick="approveStudent('${s.id}')">قبول</button>
+    </div>
+  `).join('')}` : ''}
+  `;
+}
+function openAttendanceFor(id){ VIEW.tab='attendance'; VIEW.selSession=id; render(); }
+
+/* ---------------- ATTENDANCE ---------------- */
+function tplAttendance(){
+  if(!DATA.sessions.length){
+    return `<div class="back-title" style="margin-bottom:14px;">التحضير</div><div class="empty"><p>لا يوجد حصص بعد. أضفها من تبويب "الإدارة".</p></div>`;
+  }
+  const upcoming = [...DATA.sessions].sort((a,b)=> (a.session_date+a.session_time).localeCompare(b.session_date+b.session_time));
+  const selId = VIEW.selSession || (upcoming.find(s=>s.session_date>=todayStr())||upcoming[0]).id;
+  const sess = sessionById(selId);
+  const stageStudents = DATA.students.filter(s=>s.status==='active' && s.stage_id===sess.stage_id);
+  const presentIds = new Set(DATA.attendance.filter(a=>a.session_id===sess.id).map(a=>a.student_id));
+  return `
+  <div class="back-title" style="margin-bottom:14px;">التحضير</div>
+  <div class="pill-select">
+    ${upcoming.map(s=>`<button class="pill ${s.id===selId?'active':''}" onclick="selectSession('${s.id}')">${esc(s.name)} · ${new Date(s.session_date).getDate()}/${new Date(s.session_date).getMonth()+1}</button>`).join('')}
+  </div>
+  <div class="card">
+    <div class="row-between" style="margin-bottom:12px;">
+      <div>
+        <div style="font-family:'Cairo';font-size:14px;font-weight:700;">${esc(sess.name)}</div>
+        <div class="muted">${esc(stageName(sess.stage_id))} · ${fmtDate(sess.session_date)} · ${fmtTime(sess.session_time)}</div>
+      </div>
+      <button class="btn btn-sm btn-ghost" onclick="showQr('${sess.id}')">${ICONS.qr} عرض QR</button>
+    </div>
+    <p class="small-note">اعرض الـQR أو الكود للطلاب ليسجّلوا حضورهم بأنفسهم من صفحتهم، أو بدّل حالة أي طالب يدويًا من القائمة تحت.</p>
+  </div>
+
+  <div class="section-title">${stageStudents.length} طالب في هذه المرحلة</div>
+  ${stageStudents.length? stageStudents.map(s=>{
+    const present = presentIds.has(s.id);
+    return `<div class="list-item">
+      <span class="badge ${present?'badge-good':'badge-bad'}" style="cursor:pointer;" onclick="toggleAttendance('${sess.id}','${s.id}')">${present?'حاضر':'غائب'}</span>
+      <div class="li-main"><div class="li-title">${esc(s.name)}</div><div class="li-sub">${present?'تم تسجيل الحضور':s.phone}</div></div>
+      <div class="avatar">${esc(s.name[0])}</div>
+    </div>`;
+  }).join('') : `<div class="empty"><p>لا يوجد طلاب مفعّلين في هذه المرحلة</p></div>`}
+  `;
+}
+function selectSession(id){ VIEW.selSession=id; render(); }
+function wireAttendanceInputs(){}
+async function toggleAttendance(sessionId, studentId){
+  const idx = DATA.attendance.findIndex(a=>a.session_id===sessionId && a.student_id===studentId);
+  try{
+    if(idx>-1){
+      const row = DATA.attendance[idx];
+      await sb.from('attendance').delete().eq('id', row.id);
+      DATA.attendance.splice(idx,1);
+    } else {
+      const { data, error } = await sb.from('attendance').insert({ session_id:sessionId, student_id:studentId, method:'code' }).select().single();
+      if(error) throw error;
+      DATA.attendance.push(data);
+    }
+    render();
+  }catch(e){ console.error(e); showToast('تعذر تحديث الحضور', true); }
+}
+function showQr(sessionId){
+  const sess = sessionById(sessionId);
+  openModal(`
+    <div class="modal-title">QR الحضور — ${esc(sess.name)}</div>
+    <div class="qr-wrap" id="qrHolder"></div>
+    <div class="code-pill">${esc(sess.code)}</div>
+    <p class="small-note" style="text-align:center;">اعرض هذا الكود للطلاب أثناء الحصة ليسجّلوا حضورهم بأنفسهم من صفحتهم</p>
+    <button class="btn btn-ghost" style="margin-top:12px;" onclick="regenCode('${sess.id}')">توليد كود جديد</button>
+  `, true);
+  setTimeout(()=>{
+    const h = document.getElementById('qrHolder');
+    if(h && window.QRCode){ h.innerHTML=''; new QRCode(h,{text:sess.code, width:170, height:170, colorDark:'#0a1412', colorLight:'#ffffff'}); }
+  },0);
+}
+async function regenCode(sessionId){
+  const code = genCode();
+  try{
+    await sb.from('sessions').update({code}).eq('id', sessionId);
+    const s = sessionById(sessionId); s.code = code;
+    closeModal(); showQr(sessionId);
+  }catch(e){ console.error(e); showToast('تعذر تحديث الكود', true); }
+}
+function stopScanner(){ /* no camera use on the teacher dashboard anymore */ }
+
+/* ---------------- STUDENTS ---------------- */
+function tplStudents(){
+  const tab = VIEW.studentsTab;
+  const pending = DATA.students.filter(s=>s.status==='pending');
+  const active = DATA.students.filter(s=>s.status==='active');
+  return `
+  <div class="back-title" style="margin-bottom:14px;">الطلبة</div>
+  <div class="tabs">
+    <div class="tab ${tab==='active'?'active':''}" onclick="setStudentsTab('active')">المفعّلين (${active.length})</div>
+    <div class="tab ${tab==='pending'?'active':''}" onclick="setStudentsTab('pending')">طلبات جديدة (${pending.length})</div>
+  </div>
+  ${tab==='pending' ? (pending.length? pending.map(s=>`
+    <div class="list-item">
+      <div class="avatar">${esc(s.name[0])}</div>
+      <div class="li-main"><div class="li-title">${esc(s.name)}</div><div class="li-sub">${esc(stageName(s.stage_id))} · ${s.phone}</div></div>
+      <button class="x-btn" onclick="rejectStudent('${s.id}')">${ICONS.x}</button>
+      <button class="btn btn-sm btn-primary" onclick="approveStudent('${s.id}')">قبول</button>
+    </div>
+  `).join('') : `<div class="empty"><p>لا يوجد طلبات جديدة</p></div>`)
+  : (active.length? active.map(s=>{
+      const attended = attendedCountThisMonth(s.id, s.stage_id);
+      const total = sessionsThisMonthForStage(s.stage_id).length;
+      return `<div class="list-item">
+        <div class="avatar">${esc(s.name[0])}</div>
+        <div class="li-main"><div class="li-title">${esc(s.name)}</div><div class="li-sub">${esc(stageName(s.stage_id))} · حضر ${attended}/${total} هذا الشهر</div></div>
+        <button class="inline-icon-btn" onclick="editStudent('${s.id}')">${ICONS.edit}</button>
+      </div>`;
+    }).join('') : `<div class="empty"><p>لا يوجد طلاب مفعّلين بعد</p></div>`)
+  }
+  `;
+}
+function setStudentsTab(t){ VIEW.studentsTab=t; render(); }
+async function approveStudent(id){
+  try{
+    await sb.from('students').update({status:'active'}).eq('id', id);
+    const s = studentById(id); s.status='active';
+    showToast('تم قبول ' + s.name); render();
+  }catch(e){ console.error(e); showToast('تعذر قبول الطالب', true); }
+}
+async function rejectStudent(id){
+  try{
+    await sb.from('students').delete().eq('id', id);
+    DATA.students = DATA.students.filter(x=>x.id!==id);
+    render();
+  }catch(e){ console.error(e); showToast('تعذر الحذف', true); }
+}
+function editStudent(id){
+  const s = studentById(id);
+  openModal(`
+    <div class="modal-title">تعديل بيانات ${esc(s.name)}</div>
+    <div class="field"><label>الاسم</label><input id="edName" type="text" value="${esc(s.name)}"></div>
+    <div class="field"><label>البريد الإلكتروني</label><input id="edEmail" type="email" value="${esc(s.email)}"></div>
+    <div class="field"><label>رقم الهاتف</label><input id="edPhone" type="tel" value="${esc(s.phone)}"></div>
+    <div class="field"><label>المرحلة</label><select id="edStage">${DATA.stages.map(st=>`<option value="${st.id}" ${st.id===s.stage_id?'selected':''}>${esc(st.name)}</option>`).join('')}</select></div>
+    <div class="field"><label>كلمة مرور جديدة (اختياري)</label><input id="edPw" type="password" placeholder="اتركها فارغة لعدم التغيير"></div>
+    <div class="grid2">
+      <button class="btn btn-outline" onclick="closeModal()">إلغاء</button>
+      <button class="btn btn-primary" onclick="saveStudentEdit('${id}')">حفظ</button>
+    </div>
+    <button class="btn btn-danger" style="margin-top:10px;" onclick="deleteStudentConfirm('${id}')">${ICONS.trash} حذف الطالب نهائيًا</button>
+  `, true);
+}
+async function saveStudentEdit(id){
+  const name = document.getElementById('edName').value.trim();
+  const email = document.getElementById('edEmail').value.trim().toLowerCase();
+  const phone = document.getElementById('edPhone').value.trim();
+  const stageId = document.getElementById('edStage').value;
+  const pw = document.getElementById('edPw').value;
+  if(pw && !isStrongPassword(pw)){ showToast('كلمة المرور الجديدة ضعيفة', true); return; }
+  const patch = { name, email, phone, stage_id: stageId };
+  try{
+    if(pw) patch.password_hash = await hashPassword(pw);
+    await sb.from('students').update(patch).eq('id', id);
+    Object.assign(studentById(id), patch);
+    closeModal(); showToast('تم الحفظ'); render();
+  }catch(e){ console.error(e); showToast('تعذر الحفظ، تأكد أن الإيميل غير مستخدم', true); }
+}
+async function deleteStudentConfirm(id){
+  try{
+    await sb.from('students').delete().eq('id', id);
+    DATA.students = DATA.students.filter(x=>x.id!==id);
+    closeModal(); render();
+  }catch(e){ console.error(e); showToast('تعذر الحذف', true); }
+}
+
+/* ---------------- PAYMENTS ---------------- */
+function tplPayments(){
+  const active = DATA.students.filter(s=>s.status==='active');
+  const paid = active.filter(s=>isPaid(s.id));
+  const unpaid = active.filter(s=>!isPaid(s.id));
+  return `
+  <div class="back-title" style="margin-bottom:14px;">المدفوعات — ${esc(currentMonth())}</div>
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-num good">${paid.length}</div><div class="stat-label">دفعوا</div></div>
+    <div class="stat-card"><div class="stat-num bad">${unpaid.length}</div><div class="stat-label">لم يدفعوا</div></div>
+  </div>
+  <div class="section-title">لم يدفعوا بعد</div>
+  ${unpaid.length? unpaid.map(s=>`
+    <div class="list-item">
+      <div class="avatar">${esc(s.name[0])}</div>
+      <div class="li-main"><div class="li-title">${esc(s.name)}</div><div class="li-sub">${esc(stageName(s.stage_id))} · ${stagePrice(s.stage_id)} جنيه</div></div>
+      <button class="btn btn-sm btn-ghost" onclick="markPaid('${s.id}')">تم الدفع</button>
+      <button class="btn btn-sm btn-primary" onclick="sendPaymentReminder('${s.id}')">${ICONS.whatsapp}</button>
+    </div>
+  `).join('') : `<div class="empty"><p>الجميع دفعوا هذا الشهر 🎉</p></div>`}
+
+  <div class="section-title">دفعوا هذا الشهر</div>
+  ${paid.length? paid.map(s=>`
+    <div class="list-item">
+      <div class="avatar">${esc(s.name[0])}</div>
+      <div class="li-main"><div class="li-title">${esc(s.name)}</div><div class="li-sub">${esc(stageName(s.stage_id))}</div></div>
+      <span class="badge badge-good">مدفوع</span>
+    </div>
+  `).join('') : `<div class="empty"><p>لا يوجد مدفوعات مسجّلة بعد</p></div>`}
+  `;
+}
+async function markPaid(studentId){
+  const m = currentMonth();
+  const s = studentById(studentId);
+  try{
+    const existing = paymentFor(studentId);
+    if(existing){
+      await sb.from('payments').update({paid:true, paid_at:new Date().toISOString(), amount:stagePrice(s.stage_id)}).eq('id', existing.id);
+      existing.paid = true;
+    } else {
+      const { data, error } = await sb.from('payments').insert({student_id:studentId, month:m, paid:true, paid_at:new Date().toISOString(), amount:stagePrice(s.stage_id)}).select().single();
+      if(error) throw error;
+      DATA.payments.push(data);
+    }
+    showToast('تم تسجيل الدفع'); render();
+  }catch(e){ console.error(e); showToast('تعذر تحديث حالة الدفع', true); }
+}
+async function sendPaymentReminder(studentId){
+  const s = studentById(studentId);
+  const price = stagePrice(s.stage_id);
+  const msg = `يجب دفع الشهر للطالب (${s.name}) والمبلغ هو (${price} جنيه)`;
+  window.open(waLink(s.phone, msg), '_blank');
+  const m = currentMonth();
+  try{
+    const existing = paymentFor(studentId);
+    if(existing){ await sb.from('payments').update({reminder_sent_at:new Date().toISOString()}).eq('id', existing.id); existing.reminder_sent_at = new Date().toISOString(); }
+    else {
+      const { data } = await sb.from('payments').insert({student_id:studentId, month:m, paid:false, amount:price, reminder_sent_at:new Date().toISOString()}).select().single();
+      if(data) DATA.payments.push(data);
+    }
+  }catch(e){ console.error(e); }
+}
+
+/* ---------------- MANAGE ---------------- */
+function tplManage(){
+  const mtab = VIEW.manageTab;
+  return `
+  <div class="back-title" style="margin-bottom:14px;">الإدارة</div>
+  <div class="tabs">
+    <div class="tab ${mtab==='stages'?'active':''}" onclick="setManageTab('stages')">المراحل</div>
+    <div class="tab ${mtab==='sessions'?'active':''}" onclick="setManageTab('sessions')">الحصص</div>
+    <div class="tab ${mtab==='settings'?'active':''}" onclick="setManageTab('settings')">الإعدادات</div>
+  </div>
+  ${mtab==='stages'?tplStages():mtab==='sessions'?tplSessions():tplSettings()}
+  `;
+}
+function setManageTab(t){ VIEW.manageTab=t; render(); }
+
+function tplStages(){
+  return `
+  <div class="card">
+    <div class="card-title">إضافة مرحلة دراسية</div>
+    <div class="field"><label>اسم المرحلة</label><input id="stageName" type="text" placeholder="مثال: الصف الثالث الثانوي"></div>
+    <button class="btn btn-primary" onclick="addStage()">${ICONS.plus} إضافة</button>
+  </div>
+  ${DATA.stages.length? DATA.stages.map(s=>`
+    <div class="list-item">
+      <div class="avatar">${esc(s.name[0])}</div>
+      <div class="li-main"><div class="li-title">${esc(s.name)}</div><div class="li-sub">${s.price?`${s.price} جنيه/شهر`:'السعر الافتراضي'}</div></div>
+      <input type="number" value="${s.price||''}" placeholder="السعر" style="width:76px;background:var(--surface2);border:1px solid var(--line);color:var(--text);padding:8px;border-radius:10px;font-size:12.5px;" onchange="setStagePrice('${s.id}',this.value)">
+      <button class="x-btn" onclick="deleteStage('${s.id}')">${ICONS.trash}</button>
+    </div>
+  `).join('') : `<div class="empty"><p>لا يوجد مراحل بعد</p></div>`}
+  `;
+}
+async function addStage(){
+  const inp = document.getElementById('stageName'); const name = inp.value.trim();
+  if(!name) return;
+  try{
+    const { data, error } = await sb.from('stages').insert({teacher_id:TEACHER_ID, name}).select().single();
+    if(error) throw error;
+    DATA.stages.push(data); render();
+  }catch(e){ console.error(e); showToast('تعذر الإضافة', true); }
+}
+async function setStagePrice(id, val){
+  const price = val? Number(val) : null;
+  try{ await sb.from('stages').update({price}).eq('id', id); const s=DATA.stages.find(x=>x.id===id); s.price=price; }
+  catch(e){ console.error(e); showToast('تعذر التحديث', true); }
+}
+async function deleteStage(id){
+  try{ await sb.from('stages').delete().eq('id', id); DATA.stages = DATA.stages.filter(s=>s.id!==id); render(); }
+  catch(e){ console.error(e); showToast('لا يمكن الحذف لوجود طلاب أو حصص مرتبطة', true); }
+}
+
+let SCHEDULE_DAYS = new Set();
+const PRESETS = [
+  {label:'السبت والثلاثاء', pair:[6,2]},
+  {label:'الأحد والأربعاء', pair:[0,3]},
+  {label:'الاثنين والخميس', pair:[1,4]},
+];
+function tplSessions(){
+  if(!DATA.stages.length) return `<div class="empty"><p>أضف مرحلة دراسية أولاً من تبويب "المراحل"</p></div>`;
+  const upcoming = [...DATA.sessions].sort((a,b)=>(a.session_date+a.session_time).localeCompare(b.session_date+b.session_time));
+  return `
+  <div class="card">
+    <div class="card-title">جدول أسبوعي — يومين كل أسبوع (8 حصص بالشهر)</div>
+    <div class="preset-row">
+      ${PRESETS.map(p=>`<button class="preset-card" data-pair="${p.pair.join(',')}" onclick="selectPreset('${p.pair.join(',')}')">
+        <span>${p.label}</span><span class="muted">أسبوعيًا</span>
+      </button>`).join('')}
+    </div>
+    <div class="field"><label>أو اختر يومين يدويًا</label></div>
+    <div class="weekday-grid">
+      ${DAYS.map((d,i)=>`<button class="weekday-chip" data-idx="${i}" onclick="toggleDay(${i})">${d.replace('ال','')}</button>`).join('')}
+    </div>
+    <div class="field"><label>اسم الحصة</label><input id="schedName" type="text" placeholder="مثال: كيمياء - المجموعة أ"></div>
+    <div class="field"><label>المرحلة</label><select id="schedStage">${DATA.stages.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
+    <div class="grid2">
+      <div class="field"><label>تبدأ من تاريخ</label><input id="schedDate" type="date"></div>
+      <div class="field"><label>الوقت</label><input id="schedTime" type="time"></div>
+    </div>
+    <button class="btn btn-primary" onclick="addWeeklySchedule()">${ICONS.calendar} توليد 8 حصص للشهر</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">إضافة حصة مفردة</div>
+    <div class="field"><label>اسم الحصة</label><input id="sessName" type="text" placeholder="مثال: مراجعة قبل الامتحان"></div>
+    <div class="field"><label>المرحلة</label><select id="sessStage">${DATA.stages.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>
+    <div class="grid2">
+      <div class="field"><label>التاريخ</label><input id="sessDate" type="date"></div>
+      <div class="field"><label>الوقت</label><input id="sessTime" type="time"></div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dim);margin-bottom:14px;cursor:pointer;">
+      <input id="sessExtra" type="checkbox" style="width:16px;height:16px;">
+      حصة إضافية — لا تُحسب ضمن الـ8 حصص الشهرية ولا تدخل في حساب الاشتراك
+    </label>
+    <button class="btn btn-ghost" onclick="addSession()">${ICONS.plus} إضافة الحصة</button>
+  </div>
+
+  <div class="section-title">الحصص القادمة</div>
+  ${upcoming.length? upcoming.map(s=>`
+    <div class="list-item">
+      <div class="avatar">${esc((stageName(s.stage_id)[0])||'ح')}</div>
+      <div class="li-main"><div class="li-title">${esc(s.name)} ${s.counts_for_payment===false?'<span class="badge badge-extra" style="padding:3px 8px;font-size:10px;">إضافية</span>':''}</div><div class="li-sub">${esc(stageName(s.stage_id))} · ${fmtDate(s.session_date)} · ${fmtTime(s.session_time)}</div></div>
+      <button class="inline-icon-btn" onclick="showQr('${s.id}')">${ICONS.qr}</button>
+      <button class="x-btn" onclick="deleteSession('${s.id}')">${ICONS.trash}</button>
+    </div>
+  `).join('') : `<div class="empty"><p>لا يوجد حصص مضافة بعد</p></div>`}
+  `;
+}
+function syncChipsUI(){
+  document.querySelectorAll('.weekday-chip').forEach(ch=>{
+    ch.classList.toggle('active', SCHEDULE_DAYS.has(Number(ch.dataset.idx)));
+  });
+  document.querySelectorAll('.preset-card').forEach(p=>{
+    const pair = p.dataset.pair.split(',').map(Number);
+    const match = pair.length===SCHEDULE_DAYS.size && pair.every(d=>SCHEDULE_DAYS.has(d));
+    p.classList.toggle('active', match);
+  });
+}
+function selectPreset(pairStr){ SCHEDULE_DAYS = new Set(pairStr.split(',').map(Number)); syncChipsUI(); }
+function toggleDay(idx){
+  if(SCHEDULE_DAYS.has(idx)) SCHEDULE_DAYS.delete(idx);
+  else {
+    if(SCHEDULE_DAYS.size>=2){ showToast('اختر يومين بس في الأسبوع', true); return; }
+    SCHEDULE_DAYS.add(idx);
+  }
+  syncChipsUI();
+}
+function nextDateForWeekday(start, weekday){
+  const d = new Date(start);
+  while(d.getDay()!==weekday) d.setDate(d.getDate()+1);
+  return d;
+}
+async function addWeeklySchedule(){
+  const name = document.getElementById('schedName').value.trim();
+  const stageId = document.getElementById('schedStage').value;
+  const date = document.getElementById('schedDate').value;
+  const time = document.getElementById('schedTime').value;
+  if(SCHEDULE_DAYS.size!==2){ showToast('اختر يومين بالأسبوع أولاً', true); return; }
+  if(!name || !date || !time){ showToast('أكمل كل البيانات', true); return; }
+  const rows = [];
+  SCHEDULE_DAYS.forEach(weekday=>{
+    const base = nextDateForWeekday(date+'T00:00:00', weekday);
+    for(let w=0; w<4; w++){
+      const d = new Date(base); d.setDate(d.getDate()+w*7);
+      rows.push({ teacher_id:TEACHER_ID, stage_id:stageId, name, session_date:d.toISOString().slice(0,10), session_time:time, code:genCode(), counts_for_payment:true });
+    }
+  });
+  try{
+    const { data, error } = await sb.from('sessions').insert(rows).select();
+    if(error) throw error;
+    DATA.sessions.push(...data); render(); showToast('تم توليد 8 حصص للشهر بنجاح');
+  }catch(e){ console.error(e); showToast('تعذر توليد الجدول', true); }
+}
+async function addSession(){
+  const name = document.getElementById('sessName').value.trim();
+  const stageId = document.getElementById('sessStage').value;
+  const date = document.getElementById('sessDate').value;
+  const time = document.getElementById('sessTime').value;
+  const extra = document.getElementById('sessExtra').checked;
+  if(!name || !date || !time){ showToast('أكمل كل بيانات الحصة', true); return; }
+  try{
+    const { data, error } = await sb.from('sessions').insert({teacher_id:TEACHER_ID, stage_id:stageId, name, session_date:date, session_time:time, code:genCode(), counts_for_payment: !extra}).select().single();
+    if(error) throw error;
+    DATA.sessions.push(data); render(); showToast('تمت إضافة الحصة');
+  }catch(e){ console.error(e); showToast('تعذر إضافة الحصة', true); }
+}
+async function deleteSession(id){
+  try{ await sb.from('sessions').delete().eq('id', id); DATA.sessions = DATA.sessions.filter(s=>s.id!==id); render(); }
+  catch(e){ console.error(e); showToast('تعذر الحذف', true); }
+}
+
+function tplSettings(){
+  return `
+  <div class="card">
+    <div class="card-title">إعدادات السنتر</div>
+    <div class="field"><label>اسم السنتر</label><input id="centerNameIn" type="text" value="${esc(DATA.teacher.center_name)}"></div>
+    <div class="field"><label>سعر الاشتراك الافتراضي (جنيه/شهر)</label><input id="defPriceIn" type="number" value="${DATA.teacher.default_price}"></div>
+    <button class="btn btn-primary" onclick="saveSettings()">حفظ</button>
+  </div>
+  `;
+}
+async function saveSettings(){
+  const center_name = document.getElementById('centerNameIn').value.trim() || DATA.teacher.center_name;
+  const default_price = Number(document.getElementById('defPriceIn').value) || DATA.teacher.default_price;
+  try{
+    await sb.from('teachers').update({center_name, default_price}).eq('id', TEACHER_ID);
+    DATA.teacher.center_name = center_name; DATA.teacher.default_price = default_price;
+    showToast('تم الحفظ'); render();
+  }catch(e){ console.error(e); showToast('تعذر الحفظ', true); }
+}
+
+/* ---------------- MODAL ---------------- */
+function openModal(html, center){
+  closeModal();
+  const bd = document.createElement('div');
+  bd.className = 'modal-backdrop' + (center?' center':'');
+  bd.id = 'modalBackdrop';
+  bd.onclick = (e)=>{ if(e.target===bd) closeModal(); };
+  bd.innerHTML = `<div class="modal-sheet">${html}</div>`;
+  document.body.appendChild(bd);
+}
+function closeModal(){ const m = document.getElementById('modalBackdrop'); if(m) m.remove(); }
+</script>
+</body>
+</html>

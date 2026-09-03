@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>دخول الطالب</title>
+<link rel="stylesheet" href="./shared.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="./supabase-config.js"></script>
+<script src="./app-common.js"></script>
+</head>
+<body>
+<div id="shell"><div id="app"></div></div>
+
+<script>
+let MODE = 'login'; // 'login' | 'register'
+let TEACHERS = [];
+let STAGES = [];
+let selectedTeacher = null;
+
+async function boot(){
+  document.getElementById('app').innerHTML = `<div class="empty" style="padding-top:100px;"><p>جارِ التحميل...</p></div>`;
+  try{
+    const { data, error } = await sb.from('teachers').select('id, center_name').order('created_at');
+    if(error) throw error;
+    TEACHERS = data || [];
+    selectedTeacher = TEACHERS[0]?.id || null;
+  }catch(e){ console.error(e); TEACHERS = []; }
+  render();
+}
+
+function render(){
+  const app = document.getElementById('app');
+  if(!TEACHERS.length){
+    app.innerHTML = `
+    <div class="brand"><div class="brand-mark">س</div><div><div class="brand-name">سنتر المدرسين</div><div class="brand-sub">بوابة الطالب</div></div></div>
+    <div class="empty"><p>لا يوجد أي سنتر مسجّل حتى الآن. لازم المدرس ينشئ حسابه أولاً.</p></div>
+    <a class="link-btn" href="./teacher-login.html">الذهاب لصفحة المدرس</a>
+    `;
+    return;
+  }
+  app.innerHTML = `
+  <div class="brand"><div class="brand-mark">س</div><div><div class="brand-name">سنتر المدرسين</div><div class="brand-sub">بوابة الطالب</div></div></div>
+  <div class="hero">
+    <h1>${MODE==='login' ? 'سجّل دخولك لمتابعة حصصك وحضورك' : 'أنشئ حسابك للانضمام إلى السنتر'}</h1>
+    <p>${MODE==='login' ? 'ادخل بالإيميل وكلمة المرور اللي سجّلتها.' : 'بعد التسجيل هينتظر حسابك موافقة المدرس.'}</p>
+  </div>
+
+  ${TEACHERS.length>1 ? `
+  <div class="field"><label>السنتر</label>
+    <select id="teacherSel" onchange="onTeacherChange(this.value)">
+      ${TEACHERS.map(t=>`<option value="${t.id}" ${t.id===selectedTeacher?'selected':''}>${esc(t.center_name)}</option>`).join('')}
+    </select>
+  </div>` : ''}
+
+  ${MODE==='login' ? tplLogin() : tplRegister()}
+
+  <button class="link-btn" onclick="toggleMode()">${MODE==='login' ? 'أول مرة؟ أنشئ حساب جديد' : 'عندك حساب بالفعل؟ سجّل الدخول'}</button>
+  `;
+  if(MODE==='register') loadStages();
+}
+function onTeacherChange(id){ selectedTeacher = id; render(); }
+function toggleMode(){ MODE = MODE==='login' ? 'register' : 'login'; render(); }
+
+function tplLogin(){
+  return `
+  <div class="card">
+    <div class="field"><label>البريد الإلكتروني</label><input id="email" type="email" placeholder="student@example.com"></div>
+    <div class="field"><label>كلمة المرور</label><input id="pw" type="password" placeholder="••••••••"></div>
+    <button class="btn btn-primary" id="loginBtn" onclick="doLogin()">دخول</button>
+  </div>`;
+}
+function tplRegister(){
+  return `
+  <div class="card">
+    <div class="field"><label>الاسم بالكامل</label><input id="name" type="text" placeholder="اسم الطالب"></div>
+    <div class="field"><label>رقم الهاتف (واتساب)</label><input id="phone" type="tel" placeholder="01xxxxxxxxx"></div>
+    <div class="field"><label>البريد الإلكتروني</label><input id="regEmail" type="email" placeholder="student@example.com"></div>
+    <div class="field" id="stageField"><label>المرحلة الدراسية</label><select id="stageSel"><option>جارِ التحميل...</option></select></div>
+    <div class="field">
+      <label>كلمة المرور</label>
+      <input id="regPw" type="password" placeholder="••••••••">
+      <div class="hint">8 خانات على الأقل، وتحتوي على حرف كبير وحرف صغير ورقم.</div>
+    </div>
+    <div class="field"><label>تأكيد كلمة المرور</label><input id="regPw2" type="password" placeholder="••••••••"></div>
+    <button class="btn btn-primary" id="regBtn" onclick="doRegister()">إرسال طلب الانضمام</button>
+  </div>`;
+}
+async function loadStages(){
+  const sel = document.getElementById('stageSel');
+  try{
+    const { data, error } = await sb.from('stages').select('id,name').eq('teacher_id', selectedTeacher).order('name');
+    if(error) throw error;
+    STAGES = data || [];
+    sel.innerHTML = STAGES.length ? STAGES.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('') : `<option value="">لا يوجد مراحل بعد</option>`;
+  }catch(e){ console.error(e); sel.innerHTML = `<option value="">تعذر التحميل</option>`; }
+}
+
+async function doLogin(){
+  const email = document.getElementById('email').value.trim().toLowerCase();
+  const pw = document.getElementById('pw').value;
+  if(!email || !pw){ showToast('أكمل البيانات', true); return; }
+  const btn = document.getElementById('loginBtn'); btn.disabled=true; btn.textContent='جارِ الدخول...';
+  try{
+    const hash = await hashPassword(pw);
+    const { data, error } = await sb.from('students').select('*').eq('email', email).limit(1);
+    if(error) throw error;
+    if(!data || !data.length || data[0].password_hash !== hash){
+      showToast('البيانات غير صحيحة', true); btn.disabled=false; btn.textContent='دخول'; return;
+    }
+    localStorage.setItem('student_session', JSON.stringify({ id:data[0].id }));
+    location.href = './student-dashboard.html';
+  }catch(e){
+    console.error(e);
+    showToast('تعذر الاتصال بقاعدة البيانات', true);
+    btn.disabled=false; btn.textContent='دخول';
+  }
+}
+async function doRegister(){
+  const name = document.getElementById('name').value.trim();
+  const phone = document.getElementById('phone').value.trim();
+  const email = document.getElementById('regEmail').value.trim().toLowerCase();
+  const stageId = document.getElementById('stageSel').value;
+  const pw = document.getElementById('regPw').value;
+  const pw2 = document.getElementById('regPw2').value;
+  if(!name || !phone || !email || !stageId){ showToast('أكمل كل البيانات', true); return; }
+  if(!isStrongPassword(pw)){ showToast('كلمة المرور ضعيفة: 8 خانات + حرف كبير وصغير ورقم', true); return; }
+  if(pw !== pw2){ showToast('كلمتا المرور غير متطابقتين', true); return; }
+  const btn = document.getElementById('regBtn'); btn.disabled=true; btn.textContent='جارِ الإرسال...';
+  try{
+    const hash = await hashPassword(pw);
+    const { data, error } = await sb.from('students').insert({
+      teacher_id: selectedTeacher, stage_id: stageId, name, phone, email, password_hash: hash, status:'pending'
+    }).select().single();
+    if(error) throw error;
+    localStorage.setItem('student_session', JSON.stringify({ id:data.id }));
+    location.href = './student-dashboard.html';
+  }catch(e){
+    console.error(e);
+    const msg = (e && e.message && e.message.includes('duplicate')) ? 'البريد الإلكتروني مستخدم بالفعل' : 'تعذر إنشاء الحساب';
+    showToast(msg, true);
+    btn.disabled=false; btn.textContent='إرسال طلب الانضمام';
+  }
+}
+
+boot();
+</script>
+</body>
+</html>

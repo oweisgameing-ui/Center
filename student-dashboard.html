@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>لوحة الطالب</title>
+<link rel="stylesheet" href="./shared.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="./supabase-config.js"></script>
+<script src="./app-common.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
+</head>
+<body>
+<div id="shell"><div id="app"></div></div>
+
+<script>
+let STUDENT_ID = null;
+let DATA = { student:null, stage:null, sessions:[], attendance:[], payment:null, price:0 };
+let scanStream=null, scanRAF=null;
+
+(function guard(){
+  const s = JSON.parse(localStorage.getItem('student_session')||'null');
+  if(!s || !s.id){ location.href='./index.html'; return; }
+  STUDENT_ID = s.id;
+  boot();
+})();
+
+async function boot(){
+  document.getElementById('app').innerHTML = `<div class="empty" style="padding-top:100px;"><p>جارِ التحميل...</p></div>`;
+  await loadAll();
+  if(!DATA.student){ localStorage.removeItem('student_session'); location.href='./index.html'; return; }
+  if(DATA.student.status !== 'active'){ renderPending(); return; }
+  render();
+}
+
+async function loadAll(){
+  try{
+    const { data: student, error } = await sb.from('students').select('*').eq('id', STUDENT_ID).single();
+    if(error) throw error;
+    DATA.student = student;
+    const [{data:stage}, {data:teacher}, {data:sessions}] = await Promise.all([
+      sb.from('stages').select('*').eq('id', student.stage_id).single(),
+      sb.from('teachers').select('*').eq('id', student.teacher_id).single(),
+      sb.from('sessions').select('*').eq('stage_id', student.stage_id).order('session_date').order('session_time'),
+    ]);
+    DATA.stage = stage || null;
+    DATA.price = (stage && stage.price) ? stage.price : (teacher ? teacher.default_price : 0);
+    DATA.sessions = sessions || [];
+    const sessionIds = DATA.sessions.map(s=>s.id);
+    DATA.attendance = sessionIds.length ? ((await sb.from('attendance').select('*').eq('student_id', STUDENT_ID).in('session_id', sessionIds)).data || []) : [];
+    const m = monthStr();
+    const { data: payment } = await sb.from('payments').select('*').eq('student_id', STUDENT_ID).eq('month', m).maybeSingle ? await sb.from('payments').select('*').eq('student_id', STUDENT_ID).eq('month', m).maybeSingle() : {data:null};
+    DATA.payment = payment || null;
+  }catch(e){ console.error(e); showToast('تعذر تحميل بياناتك', true); }
+}
+
+function renderPending(){
+  document.getElementById('app').innerHTML = `
+  <div class="row-between" style="margin-bottom:18px;"><div class="back-row" style="margin-bottom:0;"><button class="back-btn" onclick="doLogout()">${ICONS.back}</button><div class="back-title">حالة الطلب</div></div>${themeToggleBtn()}</div>
+  <div class="center-card">
+    <div style="width:56px;height:56px;border-radius:16px;background:var(--amber-soft);display:flex;align-items:center;justify-content:center;margin:0 auto 14px;">${ICONS.clock}</div>
+    <h3 style="font-size:16px;margin-bottom:8px;">طلبك قيد المراجعة</h3>
+    <p class="muted">أهلاً ${esc(DATA.student.name)}، هيتم تفعيل حسابك بمجرد موافقة المدرس.</p>
+  </div>
+  <button class="btn btn-outline" style="margin-top:16px;" onclick="boot()">تحديث الحالة</button>
+  `;
+}
+function doLogout(){ localStorage.removeItem('student_session'); location.href='./index.html'; }
+
+function attendedIds(){ return new Set(DATA.attendance.map(a=>a.session_id)); }
+function isTimePast(s){ return (s.session_date+'T'+s.session_time) < new Date().toISOString().slice(0,16); }
+function isPastForStudent(s, attended){ return isTimePast(s) || attended.has(s.id); }
+
+function render(){
+  const app = document.getElementById('app');
+  const attended = attendedIds();
+  const past = DATA.sessions.filter(s=>isPastForStudent(s, attended));
+  const countable = past.filter(s=>s.counts_for_payment!==false);
+  const attendedCount = countable.filter(s=>attended.has(s.id)).length;
+  const missedCount = countable.length - attendedCount;
+  const upcoming = DATA.sessions.filter(s=>!isPastForStudent(s, attended));
+  const paid = !!(DATA.payment && DATA.payment.paid);
+
+  app.innerHTML = `
+  <div class="row-between" style="margin-bottom:18px;">
+    <div><div class="brand-name" style="font-size:17px;">أهلاً ${esc(DATA.student.name)} 👋</div><div class="muted">${esc(DATA.stage?DATA.stage.name:'')}</div></div>
+    <div class="header-actions">${themeToggleBtn()}<button class="inline-icon-btn" onclick="doLogout()">${ICONS.logout}</button></div>
+  </div>
+
+  <div class="stats-row">
+    <div class="stat-card"><div class="stat-num good">${attendedCount}</div><div class="stat-label">حصص حضرها</div></div>
+    <div class="stat-card"><div class="stat-num bad">${missedCount}</div><div class="stat-label">حصص غاب عنها</div></div>
+    <div class="stat-card"><div class="stat-num ${paid?'good':'warn'}">${paid?'مدفوع':'غير مدفوع'}</div><div class="stat-label">اشتراك ${esc(monthStr())}</div></div>
+  </div>
+  ${!paid?`<p class="small-note" style="margin-bottom:16px;">قيمة اشتراك الشهر ${DATA.price} جنيه — من فضلك تواصل مع المدرس لتأكيد الدفع.</p>`:''}
+
+  <div class="section-title">الحصص القادمة</div>
+  ${upcoming.length? upcoming.map(s=>sessionRow(s, attended.has(s.id), false)).join('') : `<div class="empty"><p>لا يوجد حصص قادمة مجدولة</p></div>`}
+
+  <div class="section-title">حصص سابقة</div>
+  ${past.length? [...past].reverse().slice(0,8).map(s=>sessionRow(s, attended.has(s.id), true)).join('') : `<div class="empty"><p>لا يوجد حصص سابقة بعد</p></div>`}
+  `;
+}
+function sessionRow(s, present, isPast){
+  const badge = isPast ? (present?`<span class="badge badge-good">حاضر</span>`:`<span class="badge badge-bad">غائب</span>`)
+                       : `<span class="badge badge-warn">قادمة</span>`;
+  const extraTag = s.counts_for_payment===false ? `<span class="badge badge-extra" style="padding:3px 8px;font-size:10px;margin-inline-start:6px;">إضافية</span>` : '';
+  return `<div class="list-item" style="cursor:pointer;" onclick="openSession('${s.id}')">
+    <div class="avatar">${ICONS.calendar}</div>
+    <div class="li-main"><div class="li-title">${esc(s.name)}${extraTag}</div><div class="li-sub">${fmtDate(s.session_date)} · ${fmtTime(s.session_time)}</div></div>
+    ${badge}
+  </div>`;
+}
+
+function openSession(id){
+  const s = DATA.sessions.find(x=>x.id===id);
+  const attended = attendedIds();
+  const present = attended.has(id);
+  const past = isTimePast(s);
+  const extraTag = s.counts_for_payment===false ? `<span class="badge badge-extra" style="padding:3px 8px;font-size:10px;margin-inline-start:6px;">إضافية</span>` : '';
+  openModal(`
+    <div class="modal-title">${esc(s.name)}${extraTag}</div>
+    <div class="card">
+      <div class="li-sub">التاريخ</div><div style="font-weight:700;margin-bottom:10px;">${fmtDate(s.session_date)}</div>
+      <div class="li-sub">الميعاد</div><div style="font-weight:700;">${fmtTime(s.session_time)}</div>
+    </div>
+    ${present ? `<div class="empty"><p>✅ تم تسجيل حضورك في هذه الحصة</p></div>`
+      : (past ? `<div class="empty"><p>انتهت هذه الحصة ولم يتم تسجيل حضورك</p></div>`
+      : `<button class="btn btn-primary" onclick="startCheckin('${s.id}')">${ICONS.check} تسجيل حضور</button>`) }
+  `, true);
+}
+
+function startCheckin(sessionId){
+  openModal(`
+    <div class="modal-title">تسجيل الحضور</div>
+    <div class="method-row">
+      <button class="method-card active" id="mCode" onclick="setMethod('code','${sessionId}')">${ICONS.keyboard}<div style="font-size:12.5px;font-weight:700;">إدخال الكود</div></button>
+      <button class="method-card" id="mQr" onclick="setMethod('qr','${sessionId}')">${ICONS.cam}<div style="font-size:12.5px;font-weight:700;">مسح QR</div></button>
+    </div>
+    <div id="checkinBody"></div>
+  `, true);
+  setMethod('code', sessionId);
+}
+function setMethod(m, sessionId){
+  document.getElementById('mCode').className = 'method-card'+(m==='code'?' active':'');
+  document.getElementById('mQr').className = 'method-card'+(m==='qr'?' active':'');
+  const body = document.getElementById('checkinBody');
+  stopScanner();
+  if(m==='code'){
+    body.innerHTML = `
+    <div class="field"><label>كود الحصة</label><input id="chkCode" type="text" placeholder="اطلب الكود من المدرس"></div>
+    <button class="btn btn-primary" onclick="submitCheckin('${sessionId}')">تأكيد الحضور</button>
+    `;
+  } else {
+    body.innerHTML = `<div id="video-wrap" class="on"><video id="video" playsinline muted></video><div class="scan-frame"></div></div>`;
+    startScanner(sessionId);
+  }
+}
+async function submitCheckin(sessionId){
+  const code = document.getElementById('chkCode').value.trim();
+  const s = DATA.sessions.find(x=>x.id===sessionId);
+  if(!code){ showToast('اكتب الكود', true); return; }
+  if(code.toUpperCase() !== s.code.toUpperCase()){ showToast('الكود غير صحيح', true); return; }
+  try{
+    const { data, error } = await sb.from('attendance').insert({session_id:sessionId, student_id:STUDENT_ID, method:'code'}).select().single();
+    if(error){ if(String(error.message).includes('duplicate')){ showToast('تم تسجيل حضورك بالفعل'); } else throw error; }
+    else DATA.attendance.push(data);
+    closeModal(); render(); showToast('تم تسجيل حضورك بنجاح');
+  }catch(e){ console.error(e); showToast('تعذر تسجيل الحضور', true); }
+}
+function startScanner(sessionId){
+  const video = document.getElementById('video');
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}}).then(stream=>{
+    scanStream = stream; video.srcObject = stream; video.play();
+    const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d');
+    function tick(){
+      if(video.readyState === video.HAVE_ENOUGH_DATA){
+        canvas.width=video.videoWidth; canvas.height=video.videoHeight;
+        ctx.drawImage(video,0,0,canvas.width,canvas.height);
+        const img = ctx.getImageData(0,0,canvas.width,canvas.height);
+        const code = window.jsQR ? jsQR(img.data,img.width,img.height) : null;
+        if(code && code.data){
+          stopScanner();
+          const s = DATA.sessions.find(x=>x.id===sessionId);
+          if(code.data.toUpperCase() === s.code.toUpperCase()){
+            sb.from('attendance').insert({session_id:sessionId, student_id:STUDENT_ID, method:'qr'}).select().single()
+              .then(({data,error})=>{
+                if(!error) DATA.attendance.push(data);
+                closeModal(); render(); showToast('تم تسجيل حضورك بنجاح');
+              });
+          } else { showToast('كود QR غير صحيح لهذه الحصة', true); }
+          return;
+        }
+      }
+      scanRAF = requestAnimationFrame(tick);
+    }
+    scanRAF = requestAnimationFrame(tick);
+  }).catch(()=>{ showToast('تعذر تشغيل الكاميرا، استخدم الكود بدلًا منها', true); });
+}
+function stopScanner(){
+  if(scanRAF) cancelAnimationFrame(scanRAF);
+  if(scanStream){ scanStream.getTracks().forEach(t=>t.stop()); scanStream=null; }
+}
+
+/* ---------------- MODAL ---------------- */
+function openModal(html, center){
+  closeModal();
+  const bd = document.createElement('div');
+  bd.className = 'modal-backdrop' + (center?' center':'');
+  bd.id = 'modalBackdrop';
+  bd.onclick = (e)=>{ if(e.target===bd){ stopScanner(); closeModal(); } };
+  bd.innerHTML = `<div class="modal-sheet">${html}</div>`;
+  document.body.appendChild(bd);
+}
+function closeModal(){ stopScanner(); const m = document.getElementById('modalBackdrop'); if(m) m.remove(); }
+</script>
+</body>
+</html>
